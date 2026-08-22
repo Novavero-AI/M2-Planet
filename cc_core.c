@@ -1451,6 +1451,75 @@ void relational_expr(void)
 	relational_expr_stub();
 }
 
+/* a && b, evaluated the way C defines it rather than the way a bitwise AND
+ * of both sides' raw values happens to resemble it for the inputs this
+ * bootstrap has needed until now: b is not evaluated at all when a is
+ * already false, and the result is 0 or 1, never some other nonzero value
+ * a caller might not expect a boolean context to hand back. Written once,
+ * in the emit_* calls every architecture already funnels its jumps and
+ * immediates through, rather than duplicated per architecture the way the
+ * (deliberately non-short-circuiting) bitwise operators beside this are --
+ * there is nothing architecture-specific left to say once the operation
+ * is "jump", not "which instruction computes AND here".
+ */
+void logical_and_recursion(FUNCTION f, FUNCTION iterate)
+{
+	require(NULL != global_token, "Received EOF in logical_and_recursion\n");
+	if(match("&&", global_token->s))
+	{
+		char* number_string = int2str(current_count, 10, TRUE);
+		current_count = current_count + 1;
+		char* unique_id = create_unique_id("", function->s, number_string);
+
+		/* a is already in R0; short of, not into, evaluating b at all */
+		emit_jump_if_zero(REGISTER_ZERO, "AND_FALSE_", unique_id, "&&: skip b, a is false");
+
+		require_extra_token();
+		f();
+		emit_jump_if_zero(REGISTER_ZERO, "AND_FALSE_", unique_id, "&&: b is false");
+
+		emit_load_immediate(REGISTER_ZERO, 1, "&&: both true");
+		emit_unconditional_jump("AND_END_", unique_id, "&&: skip the false case");
+		emit_label("AND_FALSE_", unique_id);
+		emit_load_immediate(REGISTER_ZERO, 0, "&&: at least one side was false");
+		emit_label("AND_END_", unique_id);
+
+		current_target = integer;
+		iterate();
+	}
+}
+
+/* a || b, the same way: b is not evaluated when a is already true. */
+void logical_or_recursion(FUNCTION f, FUNCTION iterate)
+{
+	require(NULL != global_token, "Received EOF in logical_or_recursion\n");
+	if(match("||", global_token->s))
+	{
+		char* number_string = int2str(current_count, 10, TRUE);
+		current_count = current_count + 1;
+		char* unique_id = create_unique_id("", function->s, number_string);
+
+		/* a is already in R0; jump straight past b when a alone is enough */
+		emit_jump_if_zero(REGISTER_ZERO, "OR_CHECK_B_", unique_id, "||: a is false, b decides it");
+		emit_unconditional_jump("OR_TRUE_", unique_id, "||: a alone is true");
+
+		emit_label("OR_CHECK_B_", unique_id);
+		require_extra_token();
+		f();
+		emit_jump_if_zero(REGISTER_ZERO, "OR_FALSE_", unique_id, "||: b is false too");
+
+		emit_label("OR_TRUE_", unique_id);
+		emit_load_immediate(REGISTER_ZERO, 1, "||: at least one side was true");
+		emit_unconditional_jump("OR_END_", unique_id, "||: skip the false case");
+		emit_label("OR_FALSE_", unique_id);
+		emit_load_immediate(REGISTER_ZERO, 0, "||: both false");
+		emit_label("OR_END_", unique_id);
+
+		current_target = integer;
+		iterate();
+	}
+}
+
 /*
  * bitwise-expr:
  *         relational-expr
@@ -1462,52 +1531,43 @@ void relational_expr(void)
  */
 void bitwise_expr_stub(void)
 {
+	logical_and_recursion(relational_expr, bitwise_expr_stub);
+	logical_or_recursion(relational_expr, bitwise_expr_stub);
+
 	if((KNIGHT_POSIX == Architecture) || (KNIGHT_NATIVE == Architecture))
 	{
 		general_recursion(relational_expr, "AND R0 R0 R1\n", "&", bitwise_expr_stub);
-		general_recursion(relational_expr, "AND R0 R0 R1\n", "&&", bitwise_expr_stub);
 		general_recursion(relational_expr, "OR R0 R0 R1\n", "|", bitwise_expr_stub);
-		general_recursion(relational_expr, "OR R0 R0 R1\n", "||", bitwise_expr_stub);
 		general_recursion(relational_expr, "XOR R0 R0 R1\n", "^", bitwise_expr_stub);
 	}
 	else if(X86 == Architecture)
 	{
 		general_recursion(relational_expr, "and_eax,ebx\n", "&", bitwise_expr_stub);
-		general_recursion(relational_expr, "and_eax,ebx\n", "&&", bitwise_expr_stub);
 		general_recursion(relational_expr, "or_eax,ebx\n", "|", bitwise_expr_stub);
-		general_recursion(relational_expr, "or_eax,ebx\n", "||", bitwise_expr_stub);
 		general_recursion(relational_expr, "xor_eax,ebx\n", "^", bitwise_expr_stub);
 	}
 	else if(AMD64 == Architecture)
 	{
 		general_recursion(relational_expr, "and_rax,rbx\n", "&", bitwise_expr_stub);
-		general_recursion(relational_expr, "and_rax,rbx\n", "&&", bitwise_expr_stub);
 		general_recursion(relational_expr, "or_rax,rbx\n", "|", bitwise_expr_stub);
-		general_recursion(relational_expr, "or_rax,rbx\n", "||", bitwise_expr_stub);
 		general_recursion(relational_expr, "xor_rax,rbx\n", "^", bitwise_expr_stub);
 	}
 	else if(ARMV7L == Architecture)
 	{
 		general_recursion(relational_expr, "NO_SHIFT R0 R0 AND R1 ARITH2_ALWAYS\n", "&", bitwise_expr_stub);
-		general_recursion(relational_expr, "NO_SHIFT R0 R0 AND R1 ARITH2_ALWAYS\n", "&&", bitwise_expr_stub);
 		general_recursion(relational_expr, "NO_SHIFT R0 R0 OR R1 AUX_ALWAYS\n", "|", bitwise_expr_stub);
-		general_recursion(relational_expr, "NO_SHIFT R0 R0 OR R1 AUX_ALWAYS\n", "||", bitwise_expr_stub);
 		general_recursion(relational_expr, "'0' R0 R0 XOR R1 ARITH2_ALWAYS\n", "^", bitwise_expr_stub);
 	}
 	else if(AARCH64 == Architecture)
 	{
 		general_recursion(relational_expr, "AND_X0_X1_X0\n", "&", bitwise_expr_stub);
-		general_recursion(relational_expr, "AND_X0_X1_X0\n", "&&", bitwise_expr_stub);
 		general_recursion(relational_expr, "OR_X0_X1_X0\n", "|", bitwise_expr_stub);
-		general_recursion(relational_expr, "OR_X0_X1_X0\n", "||", bitwise_expr_stub);
 		general_recursion(relational_expr, "XOR_X0_X1_X0\n", "^", bitwise_expr_stub);
 	}
 	else if((RISCV32 == Architecture) || (RISCV64 == Architecture))
 	{
 		general_recursion(relational_expr, "rd_a0 rs1_a1 rs2_a0 and\n", "&", bitwise_expr_stub);
-		general_recursion(relational_expr, "rd_a0 rs1_a1 rs2_a0 and\n", "&&", bitwise_expr_stub);
 		general_recursion(relational_expr, "rd_a0 rs1_a1 rs2_a0 or\n", "|", bitwise_expr_stub);
-		general_recursion(relational_expr, "rd_a0 rs1_a1 rs2_a0 or\n", "||", bitwise_expr_stub);
 		general_recursion(relational_expr, "rd_a0 rs1_a1 rs2_a0 xor\n", "^", bitwise_expr_stub);
 	}
 }
